@@ -1,0 +1,113 @@
+// Create variable counties that are outline of Tehame, Butte, and Plumas counties, specify CA only
+var counties = ee.FeatureCollection('TIGER/2016/Counties').filter(ee.Filter.and(ee.Filter.eq('STATEFP', '06'), ee.Filter.or(
+  ee.Filter.eq('NAME','Plumas'), ee.Filter.eq('NAME','Tehama'), ee.Filter.eq('NAME','Butte'))));
+
+// Add counties to map and center
+Map.addLayer(counties);
+Map.centerObject(counties, 11);
+
+// Get landsat images, filter to 2000 to 2020 and bound by counties
+var landsat5 = ee.ImageCollection("LANDSAT/LT05/C02/T1_TOA")
+                  .filterBounds(counties)
+                  .filterDate('2000-01-01','2011-12-31')
+                  ;
+
+// Get landsat images, filter to 2000 to 2020 and bound by counties
+var landsat8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_TOA")
+                  .filterBounds(counties)
+                  .filterDate('2000-01-01','2020-12-31')
+                  ;
+
+// Adds ndvi band to images
+function ndvi5(image) {var index = image.normalizedDifference(['B4', 'B3']).rename('NDVI');
+                           return image.addBands(index);
+                           }
+
+// Adds ndvi band to images
+function ndvi8(image) {var index = image.normalizedDifference(['B5', 'B4']).rename('NDVI');
+                           return image.addBands(index);
+                           }
+// Apply NDVI function
+var ndvi_ls5 = landsat5.map(ndvi5);
+var ndvi_ls8 = landsat8.map(ndvi8);
+
+// Create elevation mask
+var DEM = ee.Image("USGS/3DEP/10m");
+var mask = DEM.gte(150).and(DEM.lte(1500));
+
+// Select 2019 NLCD landcover and clip to counties
+var dataset_NLCD = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD").filter(ee.Filter.eq('system:index', '2019')).first();
+var NLCD = dataset_NLCD.select("landcover").clip(counties);
+var dev_mask = (NLCD.lt(21).or(NLCD.gt(24))).and(NLCD.lt(11).or(NLCD.gt(11))); 
+// Only keep pixels where class does not equal developed land or open water
+
+// Clip to counties and apply mask
+var area = counties;
+function clip_values(image) {
+  var ndvi = image.select('NDVI');
+  return ndvi.clipToCollection(area).updateMask(mask).updateMask(dev_mask);
+}
+var ndvi_valid5 = ndvi_ls5.map(clip_values);
+var ndvi_valid8 = ndvi_ls8.map(clip_values);
+
+//function to calc annual growing season integral of NDVI (iNDVI) as proxy for ANPP
+var years5 = ee.List.sequence(2000,2011);//create integer list for iterating through years
+function iNDVI5(y) {
+  //select all ndvi images for a  given year (y), filter then to day of year and sum
+  var ndvi_year5 = ndvi_valid5.filter(ee.Filter.calendarRange(y,y,'year'))
+                            .filter(ee.Filter.dayOfYear(69, 202))
+                            .sum();
+  return ndvi_year5
+              .set({
+              "system:index": ee.String(ee.Number(y).int()).cat(ee.String('_ndvi')) //returns year_ndvi as name
+              });
+}
+
+
+//function to calc annual growing season integral of NDVI (iNDVI) as proxy for ANPP
+var years8 = ee.List.sequence(2013,2020);//create integer list for iterating through years
+function iNDVI8(y) {
+  //select all ndvi images for a  given year (y)
+  var ndvi_year8 = ndvi_valid8.filter(ee.Filter.calendarRange(y,y,'year'))
+                            .filter(ee.Filter.dayOfYear(69, 202))
+                            .sum();
+  return ndvi_year8
+              .set({
+              "system:index": ee.String(ee.Number(y).int()).cat(ee.String('_ndvi'))
+              });
+}
+
+//apply whole function to list of years to generate 21 iNDVI layers
+var NDVI_col5 = ee.ImageCollection.fromImages(years5.map(iNDVI5));
+print(NDVI_col5);
+var NDVI_col8 = ee.ImageCollection.fromImages(years8.map(iNDVI8));
+print(NDVI_col8);
+var NDVI_total = NDVI_col5.merge(NDVI_col8);
+print(NDVI_total);
+Map.addLayer(NDVI_col8.first());
+
+//export all 20 (no 2012) images at 30m pixel resolution to google drive
+var ExportCol = function(col, folder, scale, type,
+                         nimg, maxPixels) {
+    var colList = col.toList(nimg);
+    var n = colList.size().getInfo();
+
+    for (var i = 0; i < n; i++) {
+      var img = ee.Image(colList.get(i));
+      var id = img.id().getInfo();
+      var imgtype = {"float":img.toFloat(), 
+                     "byte":img.toByte(), 
+                     "int":img.toInt(),
+                     "double":img.toDouble()
+                    };
+      Export.image.toDrive({
+        image:imgtype[type],
+        description: id,
+        folder: folder,
+        fileNamePrefix: id,
+        scale: scale,
+        region: counties.geometry().bounds(),
+        maxPixels: maxPixels});
+    }
+  };
+ExportCol(NDVI_total, "counties_ls5n8", 30, "float", 21, 100000000);
