@@ -1,0 +1,61 @@
+// Create variable counties that are outline of Tehame, Butte, and Plumas counties, specify CA only
+var counties = ee.FeatureCollection('TIGER/2016/Counties').filter(ee.Filter.and(ee.Filter.eq('STATEFP', '06'), ee.Filter.or(
+  ee.Filter.eq('NAME','Plumas'), ee.Filter.eq('NAME','Tehama'), ee.Filter.eq('NAME','Butte'))));
+
+// Filter for 1 year, in growing season, to the county shape
+var rain = ee.ImageCollection('IDAHO_EPSCOR/GRIDMET').filterDate(ee.Date('1999-01-01'), ee.Date('2020-12-31'))
+                                                          .filterBounds(counties);
+
+// Add counties to map and center
+Map.addLayer(counties);
+Map.centerObject(counties, 8);
+
+function clip_values(image) {
+  var rain = image.select('pr');
+  return rain.clipToCollection(counties);
+}
+
+var rain_valid = rain.map(clip_values);
+
+var years = ee.List.sequence(2000,2020);
+
+function rain_sum(y) {
+  var x = ee.Number(y).subtract(1);
+  var rain_xyear = rain_valid.filter(ee.Filter.calendarRange(x, x, 'year'))
+                             .filter(ee.Filter.calendarRange(11, 12, 'month'))
+                             .sum();
+  var rain_yyear = rain_valid.filter(ee.Filter.calendarRange(y, y, 'year'))
+                             .filter(ee.Filter.calendarRange(1, 4, 'month'))
+                             .sum();
+  return rain_xyear.add(rain_yyear)
+              .set({
+              "system:index": ee.String(ee.Number(y).int()).cat(ee.String('_rain'))
+              });
+}
+var rain_col = ee.ImageCollection.fromImages(years.map(rain_sum));
+
+//export all 21 images at 30m pixel resolution to google drive
+var ExportCol = function(col, folder, scale, type,
+                         nimg, maxPixels) {
+    var colList = col.toList(nimg);
+    var n = colList.size().getInfo();
+
+    for (var i = 0; i < n; i++) {
+      var img = ee.Image(colList.get(i));
+      var id = img.id().getInfo();
+      var imgtype = {"float":img.toFloat(), 
+                     "byte":img.toByte(), 
+                     "int":img.toInt(),
+                     "double":img.toDouble()
+                    };
+      Export.image.toDrive({
+        image:imgtype[type],
+        description: id,
+        folder: folder,
+        fileNamePrefix: id,
+        scale: scale,
+        region: counties.geometry().bounds(),
+        maxPixels: maxPixels});
+    }
+  };
+ExportCol(rain_col, "rain", 30, "float", 21, 100000000);
