@@ -1,0 +1,49 @@
+// Create variable counties that are outline of Tehame, Butte, and Plumas counties, specify CA only
+var counties = ee.FeatureCollection('TIGER/2016/Counties').filter(ee.Filter.and(ee.Filter.eq('STATEFP', '06'), ee.Filter.or(
+  ee.Filter.eq('NAME','Plumas'), ee.Filter.eq('NAME','Tehama'), ee.Filter.eq('NAME','Butte'))));
+
+var geom = counties.geometry(); // used for reducers in functions
+
+// Filter for 20 years
+var rain = ee.ImageCollection('IDAHO_EPSCOR/GRIDMET').filterDate(ee.Date('1999-01-01'), ee.Date('2020-12-31'))
+                                                          .filterBounds(counties);
+// Select precipitation from data set and clip to county area
+function clip_values(image) {
+  var rain = image.select('pr');
+  return rain.clipToCollection(counties);
+}
+var rain_valid = rain.map(clip_values);
+
+// create a year sequence and empty list for iteration
+var years = ee.List.sequence(2000,2020);
+var year_list = ee.List([]);
+
+
+// Nested function to sum precip. in each month and average for whole area, for all years
+function rain_sum(y) {
+  var list = ee.List([]);
+  var months = ee.List.sequence(1,12);
+  var reduce_year = rain_valid.filter(ee.Filter.calendarRange(y, y, 'year'));
+  function rain_month(m) {
+    var reduce_month = reduce_year.filter(ee.Filter.calendarRange(m, m, 'month'));
+    var monthly_mean = reduce_month.sum(); //sum all precipation in the month
+    var monthly_value = monthly_mean.reduceRegion({ // reduce images to one average value for month
+                                    reducer: ee.Reducer.mean(),
+                                    scale: 30,
+                                    geometry: geom,
+                                    maxPixels: 100000000
+                                    });
+  return list.add(monthly_value.get('pr')); // returns list of monthly average values
+  }
+var yearly = months.map(rain_month);
+return year_list.add(yearly); // returns list of lists for each year of each months
+}
+var rain_list = years.map(rain_sum);
+
+Export.table.toDrive({
+  collection: ee.FeatureCollection(
+    ee.Feature(rain_list.flatten())
+  ),
+  description: 'rain_list',
+  fileFormat: 'CSV'
+});
